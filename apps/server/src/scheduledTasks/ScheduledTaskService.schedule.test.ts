@@ -550,7 +550,7 @@ it.effect(
       );
 
       expect({ status: morning?.lastRunStatus, error: morning?.lastRunError }).toEqual({
-        status: "succeeded",
+        status: "dispatched",
         error: null,
       });
       expect(morning?.nextRunAt).toBe(DateTime.formatIso(DateTime.toUtc(at(8, 0, 2))));

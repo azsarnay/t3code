@@ -1082,7 +1082,7 @@ it.effect("retrying a running window keeps the prompt it was dispatched with", (
         yield* service.triggerWebhook(requestFor(task));
         yield* save("Prompt at dispatch");
         yield* sql`CREATE TRIGGER fail_completion BEFORE UPDATE ON scheduled_tasks
-          WHEN NEW.last_run_status = 'succeeded' BEGIN SELECT RAISE(FAIL, 'completion unavailable'); END`;
+          WHEN NEW.last_run_status = 'dispatched' BEGIN SELECT RAISE(FAIL, 'completion unavailable'); END`;
         yield* TestClock.adjust("10 seconds");
         yield* drainPendingDispatch(workers);
         const launched = yield* Queue.take(launches);
@@ -1408,7 +1408,7 @@ it.effect("start failures release both replay keys and relay claims for redelive
         );
         assert.equal(retry._tag === "accepted" && retry.outcome, "accepted");
         yield* Queue.take(launches);
-        assert.equal((yield* service.list()).tasks[0]!.lastRunStatus, "succeeded");
+        assert.equal((yield* service.list()).tasks[0]!.lastRunStatus, "dispatched");
       }),
     { failLaunches: { remaining: 1 } },
   ),
@@ -1528,7 +1528,7 @@ it.effect("keeps replay keys when dispatch succeeds but completion bookkeeping f
         }),
       );
       yield* sql`CREATE TRIGGER fail_completion BEFORE UPDATE ON scheduled_tasks
-      WHEN NEW.last_run_status = 'succeeded' BEGIN SELECT RAISE(FAIL, 'completion unavailable'); END`;
+      WHEN NEW.last_run_status = 'dispatched' BEGIN SELECT RAISE(FAIL, 'completion unavailable'); END`;
       yield* waitForSpan(
         service.triggerWebhook(requestFor(task)),
         "ScheduledTaskService.runWebhookDelivery",
@@ -1920,7 +1920,7 @@ it.effect.each([false, true])(
               requestFor(task, { headers: { group: "old" }, bodyText: '{"value":"old"}' }),
             );
             yield* sql`CREATE TRIGGER fail_old_completion BEFORE UPDATE ON scheduled_tasks
-        WHEN NEW.last_run_status = 'succeeded' BEGIN SELECT RAISE(FAIL, 'completion unavailable'); END`;
+        WHEN NEW.last_run_status = 'dispatched' BEGIN SELECT RAISE(FAIL, 'completion unavailable'); END`;
             yield* TestClock.adjust("10 seconds");
             yield* drainPendingDispatch(workers);
             yield* Queue.take(launches);
@@ -1959,7 +1959,7 @@ it.effect.each([false, true])(
                     last_run_status: string;
                   }>`SELECT run_count, last_run_status FROM scheduled_tasks WHERE task_id = ${task.id}`;
                   assert.equal(recovered!.run_count, 1);
-                  assert.equal(recovered!.last_run_status, "failed");
+                  assert.equal(recovered!.last_run_status, "unknown");
                   if (corrupt)
                     yield* sql`UPDATE scheduled_tasks SET model_selection_json = ${before!.model_selection_json} WHERE task_id = ${task.id}`;
                   yield* drainPendingDispatch(restartedWorkers);
@@ -1969,6 +1969,16 @@ it.effect.each([false, true])(
                     (yield* sql`SELECT 1 FROM scheduled_task_webhook_pending`).length,
                     0,
                   );
+                  const [latest] = yield* sql<{
+                    last_run_webhook_delivery_id: string;
+                    last_run_status: string;
+                  }>`
+                    SELECT last_run_webhook_delivery_id, last_run_status FROM scheduled_tasks WHERE task_id = ${task.id}`;
+                  assert.equal(
+                    latest!.last_run_webhook_delivery_id,
+                    before!.last_run_webhook_delivery_id,
+                  );
+                  assert.equal(latest!.last_run_status, "unknown");
                   yield* restartedWorkers.get("webhook-coalescing")!;
                   assert.equal((yield* restarted.list()).tasks[0]!.runCount, 2);
                 }),
