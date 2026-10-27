@@ -383,15 +383,19 @@ function deliveryOutcomeVariant(outcome: string) {
 
 const RUN_STATUS_LABELS: Record<ScheduledTask["lastRunStatus"], string> = {
   never: msg("Never run"),
+  dispatching: msg("Dispatching", { $context: "scheduled task run status" }),
+  dispatched: msg("Dispatched", { $context: "scheduled task run status" }),
   running: msg("Running", { $context: "scheduled task run status" }),
   succeeded: msg("Succeeded"),
   failed: msg("Failed", { $context: "scheduled task run status" }),
+  cancelled: msg("Cancelled", { $context: "scheduled task run status" }),
+  unknown: msg("Unknown", { $context: "scheduled task run status" }),
 };
 
 function statusVariant(status: ScheduledTask["lastRunStatus"]) {
   if (status === "failed") return "error";
   if (status === "succeeded") return "success";
-  if (status === "running") return "info";
+  if (status === "running" || status === "dispatching" || status === "dispatched") return "info";
   return "outline";
 }
 

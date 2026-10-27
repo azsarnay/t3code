@@ -349,7 +349,7 @@ it.effect("keeps one queued occurrence of a recurring task while its bound threa
       yield* Effect.flatten(Ref.get(runDueWork));
       expect(yield* queuedOccurrences).toBe(1);
       const [resumed] = (yield* service.list()).tasks;
-      expect(resumed?.lastRunStatus).toBe("succeeded");
+      expect(resumed?.lastRunStatus).toBe("dispatched");
       expect(resumed?.lastRunError).toBeNull();
 
       // A one-time task's only scheduled occurrence still sends behind a queued Run now.
@@ -595,7 +595,7 @@ it.effect(
       );
 
       expect({ status: morning?.lastRunStatus, error: morning?.lastRunError }).toEqual({
-        status: "succeeded",
+        status: "dispatched",
         error: null,
       });
       expect(morning?.nextRunAt).toBe(DateTime.formatIso(DateTime.toUtc(at(8, 0, 2))));
