@@ -118,6 +118,10 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
               link: McpInvocationContext.threadLinkFor(scope, threadId),
             }),
         lastRunStatus: task.lastRunStatus,
+        ...(task.lastRunError == null ? {} : { lastRunError: task.lastRunError }),
+        ...(task.lastRunMessageId == null ? {} : { lastRunMessageId: task.lastRunMessageId }),
+        ...(task.lastRunThreadId == null ? {} : { lastRunThreadId: task.lastRunThreadId }),
+        ...(task.lastRunId == null ? {} : { lastRunId: task.lastRunId }),
         runCount: task.runCount,
         nextRunAt: task.nextRunAt,
       };

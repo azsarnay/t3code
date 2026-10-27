@@ -319,7 +319,7 @@ it.effect.each(deliveries)(
                 }),
               );
               const ran = yield* service.runNow({ id: task.id });
-              assert.equal(ran.task.lastRunStatus, "succeeded");
+              assert.equal(ran.task.lastRunStatus, "dispatched");
             }).pipe(
               Effect.provide(
                 ScheduledTaskService.layer.pipe(

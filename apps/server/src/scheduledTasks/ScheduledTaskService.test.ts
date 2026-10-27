@@ -1,4 +1,3 @@
-import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as NodeUtil from "node:util";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -10,29 +9,176 @@ import {
   ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
-import * as SqlClient from "effect/sql/SqlClient";
-
-import * as Fiber from "effect/Fiber";
-import * as Stream from "effect/Stream";
-import * as Deferred from "effect/Deferred";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import * as SecretRequests from "../secrets/SecretRequests.ts";
-import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
+import { ensureScheduledTaskOutcomeSchema } from "./scheduledTaskOutcomeSchema.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
+
+it.effect(
+  "reconciles exact scheduled messages across restart without replaying or stamping newer runs",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-10-26T12:00:00.000Z";
+      yield* TestClock.setTime(Date.parse(now));
+      yield* insertRow(sql, { id: "outcomes", next: null, enabled: 0, status: "never" }, now);
+      const launches: string[] = [];
+      const workers = new Map<string, Effect.Effect<void>>();
+      const dependencies = Layer.mergeAll(
+        ManagedPolicy.layerTest(),
+        Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+          launch: (input) =>
+            Effect.sync(() => {
+              launches.push(input.initialMessage!.messageId!);
+              return { threadId: ThreadId.make("outcome-thread"), resumed: false } as never;
+            }),
+        }),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: "/projects",
+          isScratchProject: () => Effect.succeed(false),
+        }),
+        NodeCrypto.layer,
+        Layer.succeed(Scheduler.Scheduler, {
+          register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
+            Effect.gen(function* () {
+              const context = yield* Effect.context<R>();
+              workers.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
+            }),
+        }),
+      );
+      const serviceLayer = ScheduledTaskService.layer.pipe(Layer.provide(dependencies));
+      const tick = Effect.suspend(() => workers.get("scheduled-tasks")!);
+      const taskId = ScheduledTaskId.make("outcomes");
+      const seedRun = Effect.fn("test.seedScheduledRun")(function* (
+        messageId: string,
+        runId: string,
+        status: string,
+        ordinal: number,
+      ) {
+        yield* sql`INSERT INTO orchestration_v2_projection_messages ${sql.insert({
+          message_id: messageId,
+          thread_id: "outcome-thread",
+          run_id: runId,
+          node_id: null,
+          role: "user",
+          streaming: 0,
+          created_at: now,
+          updated_at: now,
+          payload_json: "{}",
+        })}`;
+        yield* sql`INSERT INTO orchestration_v2_projection_runs ${sql.insert({
+          run_id: runId,
+          thread_id: "outcome-thread",
+          ordinal,
+          provider: "codex",
+          status,
+          requested_at: now,
+          completed_at: null,
+          payload_json: JSON.stringify({ userMessageId: messageId }),
+        })}`;
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const context = yield* Layer.build(serviceLayer);
+          const service = Context.get(context, ScheduledTaskService.ScheduledTaskService);
+          const dispatched = yield* service.runNow({ id: taskId });
+          assert.equal(dispatched.task.lastRunStatus, "dispatched");
+          assert.equal(dispatched.task.runCount, 1);
+          yield* seedRun(launches[0]!, "outcome-run-1", "queued", 1);
+          yield* tick;
+          assert.equal((yield* service.list()).tasks[0]!.lastRunStatus, "dispatched");
+          yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'running'`;
+          yield* tick;
+          assert.equal((yield* service.list()).tasks[0]!.lastRunStatus, "running");
+        }),
+      );
+      yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'failed' WHERE run_id = 'outcome-run-1'`;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const context = yield* Layer.build(serviceLayer);
+          const service = Context.get(context, ScheduledTaskService.ScheduledTaskService);
+          yield* tick;
+          let task = (yield* service.list()).tasks[0]!;
+          assert.equal(task.lastRunStatus, "failed");
+          assert.isNotNull(task.lastRunError);
+          assert.equal(task.runCount, 1);
+          assert.equal(launches.length, 1);
+          yield* service.runNow({ id: taskId });
+          assert.notEqual(launches[0], launches[1]);
+          yield* seedRun(launches[1]!, "outcome-run-2", "waiting", 2);
+          yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'completed' WHERE run_id = 'outcome-run-1'`;
+          yield* tick;
+          assert.equal((yield* service.list()).tasks[0]!.lastRunStatus, "running");
+          for (const [status, expected] of [
+            ["completed", "succeeded"],
+            ["cancelled", "cancelled"],
+            ["future-status", "unknown"],
+          ]) {
+            yield* service.runNow({ id: taskId });
+            yield* seedRun(
+              launches.at(-1)!,
+              `outcome-run-${launches.length}`,
+              status!,
+              launches.length,
+            );
+            yield* tick;
+            task = (yield* service.list()).tasks[0]!;
+            assert.equal(task.lastRunStatus, expected);
+            assert.equal(task.runCount, launches.length);
+          }
+          yield* service.runNow({ id: taskId });
+          yield* tick;
+          assert.equal((yield* service.list()).tasks[0]!.lastRunStatus, "unknown");
+          assert.equal(launches.length, 6);
+        }),
+      );
+      for (const corrupt of [false, true]) {
+        const id = corrupt ? "crashed-corrupt" : "crashed";
+        yield* insertRow(sql, { id, next: now, enabled: 1, status: "dispatching" }, now);
+        yield* sql`UPDATE scheduled_tasks SET last_run_message_id = ${id} WHERE task_id = ${id}`;
+        if (corrupt)
+          yield* sql`UPDATE scheduled_tasks SET model_selection_json = 'broken' WHERE task_id = ${id}`;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* Layer.build(serviceLayer);
+            yield* tick;
+            const [recovered] = yield* sql<{
+              last_run_status: string;
+              next_run_at: string;
+              run_count: number;
+            }>`SELECT last_run_status, next_run_at, run_count FROM scheduled_tasks WHERE task_id = ${id}`;
+            assert.equal(recovered!.last_run_status, "unknown");
+            assert.equal(recovered!.run_count, 1);
+            assert.equal(recovered!.next_run_at, corrupt ? now : "2026-10-26T12:01:00.000Z");
+            assert.equal(launches.length, 6);
+          }),
+        );
+      }
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
 
 const insertRow = (
   sql: SqlClient.SqlClient,
@@ -72,6 +218,8 @@ const insertRow = (
 it.effect("loads only due tasks and skips corrupt due rows without decoding settled tasks", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    // The service layer runs this at startup; this test calls listDueTasks without it.
+    yield* ensureScheduledTaskOutcomeSchema();
     const now = "2026-09-09T12:00:00.000Z";
     const secret = "PROMPT-SECRET-DO-NOT-LOG";
     const credential = "CREDENTIAL-SECRET-DO-NOT-LOG";
@@ -222,7 +370,7 @@ it.effect(
           const inflight = yield* sql<{
             last_run_status: string;
           }>`SELECT last_run_status FROM scheduled_tasks WHERE task_id = 'due-third'`;
-          assert.equal(inflight[0]?.last_run_status, "running");
+          assert.equal(inflight[0]?.last_run_status, "dispatching");
           yield* Deferred.succeed(releaseLast, undefined);
         }),
       );
@@ -389,7 +537,7 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
         Stream.runForEach(({ tasks }) => {
           const current = tasks.find((candidate) => candidate.id === task.id);
           if (current === undefined) return Deferred.succeed(removed, undefined);
-          return current.lastRunStatus === "running"
+          return current.lastRunStatus === "dispatching"
             ? Deferred.succeed(running, undefined)
             : Deferred.succeed(subscribed, undefined);
         }),

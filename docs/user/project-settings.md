@@ -94,6 +94,30 @@ Webhook tasks only run when their URL is called, so they can't be run
 immediately.
 Leaving an edited form asks before discarding unsaved changes.
 
+Scheduled task status distinguishes dispatch from the destination run's outcome:
+**dispatching** sends the message, **dispatched** means it was accepted or queued,
+and **running** includes a run waiting for input or approval. Only a destination
+run that completes is **succeeded**. Provider errors (including usage limits or
+capacity errors) become **failed**; interrupted, cancelled, or rolled-back runs
+become **cancelled**. **Unknown** means the exact run cannot currently be verified,
+not that it succeeded. Status reconciles from durable run state on startup and
+on the scheduler's five-second tick, even for paused tasks. API results include
+the latest invocation's message, destination thread, and run IDs when known.
+
+Run count and the next scheduled time advance when dispatch finishes, not when
+the agent completes. A newer invocation replaces the task's displayed outcome;
+older runs cannot overwrite it. Existing historical dispatch successes without exact
+message linkage migrate to **unknown**, rather than being presented as verified work.
+Webhook acceptance, replay protection,
+coalescing, and delivery history still describe delivery/dispatch, not agent
+completion; a downstream failure does not release a webhook replay key.
+
+Failed, cancelled, and unverified runs are not automatically replayed: they may
+have already written files or performed other side effects. After resolving a
+usage limit, capacity error, or other failure, inspect the destination thread
+and explicitly retry if appropriate. Later scheduled invocations still follow
+the configured cadence; no extra recovery invocation is created.
+
 ## Webhook automations
 
 In **Settings → Scheduled tasks**, choose **On webhook**
