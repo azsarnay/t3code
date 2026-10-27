@@ -2,9 +2,11 @@ import * as Schema from "effect/Schema";
 
 import {
   CommandId,
+  MessageId,
   ForwardCompatibleArray,
   IsoDateTime,
   ProjectId,
+  RunId,
   ScheduledTaskId,
   SecretRef,
   ThreadId,
@@ -214,7 +216,16 @@ export const ScheduledTaskUpsertSchedule = Schema.Union([
 ]);
 export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Type;
 
-export const ScheduledTaskRunStatus = Schema.Literals(["never", "running", "succeeded", "failed"]);
+export const ScheduledTaskRunStatus = Schema.Literals([
+  "never",
+  "dispatching",
+  "dispatched",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "unknown",
+]);
 export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 
 export const ScheduledTaskWebhookEndpoint = Schema.Struct({
@@ -244,6 +255,9 @@ export const ScheduledTask = Schema.Struct({
   lastRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
   lastRunError: Schema.NullOr(Schema.String),
+  lastRunMessageId: Schema.optional(Schema.NullOr(MessageId)),
+  lastRunThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  lastRunId: Schema.optional(Schema.NullOr(RunId)),
   runCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   webhook: Schema.optional(ScheduledTaskWebhookEndpoint),
   /** Why the task cannot run regardless of `enabled`, such as a managed policy refusing webhooks. */

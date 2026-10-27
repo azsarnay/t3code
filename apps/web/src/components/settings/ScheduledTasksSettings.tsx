@@ -358,7 +358,7 @@ function deliveryOutcomeVariant(outcome: string) {
 function statusVariant(status: ScheduledTask["lastRunStatus"]) {
   if (status === "failed") return "error";
   if (status === "succeeded") return "success";
-  if (status === "running") return "info";
+  if (status === "running" || status === "dispatching" || status === "dispatched") return "info";
   return "outline";
 }
 

@@ -32,9 +32,13 @@ import {
 
 const STATUS_DOT_CLASS: Record<ScheduledTask["lastRunStatus"], string> = {
   never: "bg-muted-foreground/40",
+  dispatching: "bg-sky-500",
+  dispatched: "bg-sky-500",
   running: "bg-sky-500",
   succeeded: "bg-emerald-500",
   failed: "bg-destructive",
+  cancelled: "bg-muted-foreground/40",
+  unknown: "bg-amber-500",
 };
 
 function taskScheduleLine(task: ScheduledTask) {
@@ -218,7 +222,7 @@ export function ThreadAutomationsPanel(props: {
                       part="icon"
                       aria-label={`Run ${task.title} now`}
                       disabled={
-                        !canOperate || busyTaskId !== null || task.lastRunStatus === "running"
+                        !canOperate || busyTaskId !== null || task.lastRunStatus === "dispatching"
                       }
                       onClick={() => void runNow(task)}
                     >

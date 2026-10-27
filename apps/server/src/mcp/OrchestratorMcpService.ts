@@ -263,6 +263,10 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     schedule: task.schedule,
     nextRunAt: task.nextRunAt,
     lastRunStatus: task.lastRunStatus,
+    ...(task.lastRunError == null ? {} : { lastRunError: task.lastRunError }),
+    ...(task.lastRunMessageId == null ? {} : { lastRunMessageId: task.lastRunMessageId }),
+    ...(task.lastRunThreadId == null ? {} : { lastRunThreadId: task.lastRunThreadId }),
+    ...(task.lastRunId == null ? {} : { lastRunId: task.lastRunId }),
     ...(task.webhook?.url == null || !mayRun || task.blockedByPolicy !== undefined
       ? {}
       : { webhookUrl: task.webhook.url }),
