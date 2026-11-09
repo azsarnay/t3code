@@ -1,0 +1,8 @@
+[Unit]
+Description=t3code carry check (rebase a copy of carry onto the newest nightly, file a card)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/scratch/t3code-sro/docs/fork/bin/carry_check.py
