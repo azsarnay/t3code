@@ -69,9 +69,10 @@ The build tools live outside the repo. Load them first with `. ~/scratch/tools/e
    kill $HTTP
    ```
 
-6. Tag the build and push to the fork. The rebase rewrote `carry`, so its push needs a lease:
+6. Tag the build and push to the fork. Fetch `origin` first: the commit-message pre-push guard skips only commits already on `origin`'s branches, so a stale `origin/main` makes it check upstream's commits against our message rule and refuse the push. The rebase rewrote `carry`, so its push needs a lease:
 
    ```
+   git fetch origin
    git tag "ours/v$V" HEAD
    git push --force-with-lease=carry origin carry "ours/v$V"
    ```
