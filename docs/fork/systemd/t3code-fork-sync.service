@@ -1,0 +1,10 @@
+[Unit]
+Description=t3code fork sync (gh repo sync, then fast-forward the local main)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+# gh needs a token with the workflow scope; put GH_TOKEN=... here (not in the repo)
+EnvironmentFile=-%h/.config/t3code-fork/env
+ExecStart=/usr/bin/python3 %h/scratch/t3code-sro/docs/fork/bin/fork_sync.py
