@@ -3,6 +3,7 @@ Description=t3code fork sync (gh repo sync, then fast-forward the local main)
 
 [Service]
 Type=oneshot
+TimeoutStartSec=10min
 WorkingDirectory=%h
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 # gh needs a token with the workflow scope; put GH_TOKEN=... here (not in the repo)

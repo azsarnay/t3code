@@ -77,6 +77,15 @@ The build tools live outside the repo. Load them first with `. ~/scratch/tools/e
    git push --force-with-lease=carry origin carry "ours/v$V"
    ```
 
+## Timers
+
+Two systemd user timers on dev-abby run scripts from `docs/fork/bin` in this clone, so the scripts live on `carry` and this clone stays on `carry`:
+
+- `t3code-fork-sync.timer` (06:00) runs `fork_sync.py`. It runs `gh repo sync azsarnay/t3code`, then fast-forwards `main` in `~/repos/personal/t3code` when that checkout is on a clean `main`.
+- `t3code-carry-check.timer` (06:30) runs `carry_check.py`. When a nightly newer than carry's base is out, it rebases a detached copy of `carry` in a throwaway worktree under `~/scratch/carry-check`, runs step 3 with each command capped at 45 minutes, and records `range-diff`. It files one card per nightly, parked as needs-input so no agent picks it up. It never moves `carry`, builds, swaps or pushes. Logs and the card text are in `~/.local/state/t3code-fork/carry-check/<tag>/`.
+
+Install them with `cp docs/fork/systemd/* ~/.config/systemd/user/`, `systemctl --user daemon-reload` and `systemctl --user enable --now t3code-fork-sync.timer t3code-carry-check.timer`. The fork sync reads `GH_TOKEN` from `~/.config/t3code-fork/env` when that file exists. Read runs with `journalctl --user -u t3code-fork-sync -u t3code-carry-check`. Tests: `python3 -m unittest discover -s docs/fork/bin`.
+
 ## Going to stock
 
 Stop T3, run the database script, then install stock:

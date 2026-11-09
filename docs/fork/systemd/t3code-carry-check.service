@@ -3,6 +3,8 @@ Description=t3code carry check (rebase a copy of carry onto the newest nightly, 
 
 [Service]
 Type=oneshot
+# above the three 45-minute check limits in carry_check.py
+TimeoutStartSec=3h
 WorkingDirectory=%h
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 %h/scratch/t3code-sro/docs/fork/bin/carry_check.py

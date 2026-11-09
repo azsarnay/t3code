@@ -5,14 +5,17 @@ Fetches upstream tags. When a nightly newer than carry's base exists and no card
 in the taskboard queue or its Archive, rebases a detached copy of carry in a throwaway
 worktree, runs step 3 of docs/fork/CARRY.md under `nice -n 15`, records `git range-diff`,
 and files a card with the result. It never moves `carry`, pushes, builds or swaps T3.
+The card is parked as needs-input with a question open, so no watcher hands it to an agent.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +34,7 @@ STEP3 = [
     " --concurrency-limit 2 typecheck",
 ]
 TAIL = 60
+STEP_TIMEOUT = 45 * 60  # seconds per STEP3 command; t3code-carry-check.service's limit covers all
 
 
 def git(repo, *args, check=True):
@@ -62,8 +66,9 @@ def rebase(wt, tag):
     r = git(wt, "rebase", tag, check=False)
     while r.returncode:
         unmerged = git(wt, "diff", "--name-only", "--diff-filter=U").splitlines()
-        markers = [f for f in unmerged
-                   if re.search(r"^<{7} ", (wt / f).read_text(errors="replace"), re.M)]
+        # a rename/rename or rename/delete conflict leaves an unmerged path with no file
+        markers = [f for f in unmerged if not (wt / f).is_file()
+                   or re.search(r"^<{7} ", (wt / f).read_text(errors="replace"), re.M)]
         if not unmerged or markers or git(wt, "rerere", "remaining"):
             git(wt, "rebase", "--abort", check=False)
             return unmerged or ["(the rebase stopped with no conflicted file)"]
@@ -72,16 +77,34 @@ def rebase(wt, tag):
     return []
 
 
+def run_bounded(script, cwd, out):
+    """SCRIPT's exit code, or None when it ran past STEP_TIMEOUT and was killed with its
+    whole process group (pnpm and the test workers it started)."""
+    p = subprocess.Popen(["bash", "-c", script], cwd=cwd, stdout=out, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    try:
+        return p.wait(timeout=STEP_TIMEOUT)
+    except BaseException as e:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait()
+        if not isinstance(e, subprocess.TimeoutExpired):
+            raise
+        return None
+
+
 def step3(wt, tag, env_sh, logs):
     """Each failing check as (command, log tail)."""
     failures = []
+    # env.sh puts the sro checkout's node_modules/.bin on PATH; the worktree's own must win
+    prefix = (f". {shlex.quote(env_sh)} && " if env_sh else "") + \
+        'export PATH="$PWD/node_modules/.bin:$PATH" && nice -n 15 '
     for i, cmd in enumerate(STEP3):
         log = logs / f"step3-{i}.log"
-        script = f". {shlex.quote(env_sh)} && nice -n 15 {cmd}" if env_sh else f"nice -n 15 {cmd}"
         with log.open("w") as out:
-            code = subprocess.run(["bash", "-c", script], cwd=wt, stdout=out,
-                                  stderr=subprocess.STDOUT).returncode
-        if code:
+            code = run_bounded(prefix + cmd, wt, out)
+        if code is None:
+            cmd = f"{cmd} (timed out after {STEP_TIMEOUT} s)"
+        if code != 0:
             tail = log.read_text(errors="replace").splitlines()[-TAIL:]
             failures.append((cmd, "\n".join(tail)))
     persistence = git(wt, "diff", "--stat", tag, "HEAD", "--", "apps/server/src/persistence")
@@ -96,21 +119,38 @@ def fence(text):
 
 
 def card(tag, base, carry, conflicts, failures, range_diff, logs):
+    """A report of the result only: the card must not read as work for an agent."""
     prefix = title_prefix(tag)
     head = (f"Upstream nightly `{tag}` is out. `carry` ({carry[:10]}) is on `{base}`. "
-            f"A detached copy of carry was rebased onto it in a throwaway worktree; "
-            f"`carry` itself did not move. Logs: {logs}")
+            f"The carry check rebased a detached copy of carry onto it in a throwaway "
+            f"worktree; `carry` itself did not move. Logs: {logs}")
     if conflicts:
         files = "\n".join(f"- `{f}`" for f in conflicts)
         return (f"{prefix}: carry rebase conflicts\n{head}\n\n"
-                f"The rebase stopped on these files (rerere had no resolution):\n{files}\n\n"
-                f"Resolve them by hand with CARRY.md step 2.")
+                f"The rebase stopped on these files (rerere had no resolution):\n{files}")
     rd = f"`git range-diff {base}..carry {tag}..<rebased>`:\n{fence(range_diff)}"
     if failures:
         parts = "\n\n".join(f"`{cmd}` failed:\n{fence(tail)}" for cmd, tail in failures)
         return f"{prefix}: carry checks fail\n{head}\n\n{rd}\n\nCARRY.md step 3:\n\n{parts}"
     return (f"{prefix} rebases and passes with the carry commits\n{head}\n\n{rd}\n\n"
-            f"CARRY.md step 3 passed. Ready for a manual build (CARRY.md steps 2 and 4 to 6).")
+            f"CARRY.md step 3 passed on the rebased copy.")
+
+
+# Parks the card for the owner: a needs-input card with a question open is never dispatched.
+QUESTION = {"questions": [{
+    "id": "close", "text": "This is a report from the carry check. Close it?",
+    "options": [
+        {"label": "Close it", "recommended": True,
+         "description": "the owner updates carry by hand when they choose to"},
+        {"label": "Close it and skip this nightly"}]}]}
+
+
+def taskboard(cmd, *args, stdin):
+    r = subprocess.run([*shlex.split(cmd), "taskboard.py", *args], input=stdin,
+                       capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit(f"taskboard.py {args[0]} failed:\n{r.stderr.strip()}")
+    return r.stdout.strip()
 
 
 def main(argv=None):
@@ -142,7 +182,23 @@ def default_queue(taskboard):
 
 
 def check(a):
+    a.state.mkdir(parents=True, exist_ok=True)
+    with open(a.state / ".lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("another carry check is already running")
+            return 0
+        return locked_check(a)
+
+
+def locked_check(a):
     a.queue = a.queue or default_queue(a.taskboard)
+    # a run killed past its unit's timeout leaves its worktree behind
+    for line in git(a.repo, "worktree", "list", "--porcelain").splitlines():
+        path = Path(line.removeprefix("worktree "))
+        if line.startswith("worktree ") and path.parent.resolve() == a.work_root.resolve():
+            git(a.repo, "worktree", "remove", "--force", str(path), check=False)
     git(a.repo, "fetch", "--quiet", "--tags", "upstream")
     tags = git(a.repo, "tag", "-l", NIGHTLY, "--sort=-v:refname").splitlines()
     if not tags:
@@ -176,14 +232,17 @@ def check(a):
 
     body = card(tag, base, carry, conflicts, failures, range_diff, logs)
     (logs / "card.md").write_text(body + "\n")
-    r = subprocess.run([*shlex.split(a.taskboard), "taskboard.py", "add", "--dir", str(a.queue),
-                        "--priority", "medium", "--stdin"], input=body, capture_output=True,
-                       text=True)
-    if r.returncode:
-        raise SystemExit(f"could not file the card for {tag}:\n{r.stderr.strip()}")
-    print(r.stdout.strip())
+    # shortcut: `add` only writes queued cards, so the card is queued for the moment
+    # before `ask` parks it; a taskboard verb that files straight to needs-input would close it
+    path = taskboard(a.taskboard, "add", "--dir", str(a.queue), "--priority", "medium",
+                     "--stdin", stdin=body).removeprefix("queued: ")
+    taskboard(a.taskboard, "status", path, "started", stdin="")
+    taskboard(a.taskboard, "ask", path, "--stdin", stdin=json.dumps(QUESTION))
+    print(f"filed {path} (needs-input)")
     return 0
 
 
 if __name__ == "__main__":
+    # systemd stops a run past TimeoutStartSec with SIGTERM: unwind so the worktree goes
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit("stopped by SIGTERM"))
     sys.exit(main())
