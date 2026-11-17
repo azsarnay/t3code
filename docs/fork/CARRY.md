@@ -1,6 +1,6 @@
 # Carrying fork changes
 
-This fork, `azsarnay/t3code`, keeps its own changes on one branch, `carry`, on top of a stock upstream nightly tag. They stay on the fork. They are never sent to `pingdotgg/t3code` as a pull request and never pushed to the `upstream` remote. In this clone, `gh` defaults to `azsarnay/t3code` and the `upstream` push URL is set to `DISABLED-fork-only`.
+This fork, `azsarnay/t3code`, keeps its own changes on one branch, `carry`, on top of a stock upstream nightly tag. They stay on the fork. They are never sent to `pingdotgg/t3code` as a pull request and never pushed to the `upstream` remote. The `carry` to work on is the one in `~/repos/personal/t3code`, checked out in its worktree `~/repos/personal/t3code-carry`; do every step below there. The installed build came from it. `~/scratch/t3code-sro` has an older `carry`; do not rebase or build from it. In both clones, `gh` defaults to `azsarnay/t3code` and the `upstream` push URL is set to `DISABLED-fork-only`.
 
 - `main` on the fork is a plain copy of upstream `main`. Never commit to it; sync it with `gh repo sync azsarnay/t3code`.
 - `carry` holds one commit per change, plus this file. Rebase it onto each new nightly tag.
@@ -8,7 +8,7 @@ This fork, `azsarnay/t3code`, keeps its own changes on one branch, `carry`, on t
 
 Today `carry` holds one change, the scheduled-run-outcomes fix. It adds no numbered migration: `apps/server/src/scheduledTasks/scheduledTaskOutcomeSchema.ts` adds its columns at service start, so the database's migration history stays the same as stock.
 
-The build tools live outside the repo. Load them first with `. ~/scratch/tools/env.sh` (Node 26.12.1, pnpm through corepack, patchelf, and this clone's `vp`). Run heavy steps under `nice -n 15`, since agents share the VM. `git config rerere.enabled true` is set in this clone, so a conflict resolved once is reapplied on later rebases.
+The build tools live outside the repo. Load them first with `. ~/scratch/tools/env.sh` (Node 26.12.1, pnpm through corepack, patchelf, and the `vp` in `~/scratch/t3code-sro`). Run heavy steps under `nice -n 15`, since agents share the VM. `git config rerere.enabled true` is set in `~/repos/personal/t3code`, so a conflict resolved once is reapplied on later rebases.
 
 ## For each new nightly
 
@@ -79,12 +79,12 @@ The build tools live outside the repo. Load them first with `. ~/scratch/tools/e
 
 ## Timers
 
-Two systemd user timers on dev-abby run scripts from `docs/fork/bin` in this clone, so the scripts live on `carry` and this clone stays on `carry`:
+Two systemd user timers on dev-abby run scripts from `docs/fork/bin` in `~/repos/personal/t3code-carry`, so the scripts live on `carry` and that worktree stays on `carry`:
 
 - `t3code-fork-sync.timer` (06:00) runs `fork_sync.py`. It runs `gh repo sync azsarnay/t3code`, then fast-forwards `main` in `~/repos/personal/t3code` when that checkout is on a clean `main`.
-- `t3code-carry-check.timer` (06:30) runs `carry_check.py`. When a nightly newer than carry's base is out, it rebases a detached copy of `carry` in a throwaway worktree under `~/scratch/carry-check`, runs step 3 with each command capped at 45 minutes, and records `range-diff`. It files one card per nightly, parked as needs-input so no agent picks it up. It never moves `carry`, builds, swaps or pushes. Logs and the card text are in `~/.local/state/t3code-fork/carry-check/<tag>/`.
+- `t3code-carry-check.timer` (06:30) runs `carry_check.py` on `carry` in `~/repos/personal/t3code`. It exits 1 without filing a card when `carry` does not hold the nightly the running T3 build is on (`activeVersion` in `~/.t3/runtime/service-state.json`), since that `carry` is not the one installed. It logs a warning, and adds it to the card, when `carry` and `origin/carry` differ, which means the last rebase was not pushed to the fork. When a nightly newer than carry's base is out, it rebases a detached copy of `carry` in a throwaway worktree under `~/scratch/carry-check`, runs step 3 with each command capped at 45 minutes, and records `range-diff`. It files one card per nightly, parked as needs-input so no agent picks it up. It never moves `carry`, builds, swaps or pushes. Logs and the card text are in `~/.local/state/t3code-fork/carry-check/<tag>/`.
 
-Install them with `cp docs/fork/systemd/* ~/.config/systemd/user/`, `systemctl --user daemon-reload` and `systemctl --user enable --now t3code-fork-sync.timer t3code-carry-check.timer`. The fork sync reads `GH_TOKEN` from `~/.config/t3code-fork/env` when that file exists. Read runs with `journalctl --user -u t3code-fork-sync -u t3code-carry-check`. Tests: `python3 -m unittest discover -s docs/fork/bin`.
+Install them with `git -C ~/repos/personal/t3code worktree add ~/repos/personal/t3code-carry carry` (once), `cp docs/fork/systemd/* ~/.config/systemd/user/`, `systemctl --user daemon-reload` and `systemctl --user enable --now t3code-fork-sync.timer t3code-carry-check.timer`. The fork sync reads `GH_TOKEN` from `~/.config/t3code-fork/env` when that file exists. Read runs with `journalctl --user -u t3code-fork-sync -u t3code-carry-check`. Tests: `python3 -m unittest discover -s docs/fork/bin`.
 
 ## Going to stock
 

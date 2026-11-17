@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Rebase a copy of `carry` onto the newest upstream nightly, test it, and file one card.
 
-Fetches upstream tags. When a nightly newer than carry's base exists and no card for it is
-in the taskboard queue or its Archive, rebases a detached copy of carry in a throwaway
+Fetches upstream tags and origin. Refuses when `carry` does not hold the nightly the running
+T3 build is on, and warns when `carry` and `origin/carry` differ. When a nightly newer than
+carry's base exists and no card for it is in the taskboard queue or its Archive, rebases a detached copy of carry in a throwaway
 worktree, runs step 3 of docs/fork/CARRY.md under `nice -n 15`, records `git range-diff`,
 and files a card with the result. It never moves `carry`, pushes, builds or swaps T3.
 The card is parked as needs-input with a question open, so no watcher hands it to an agent.
@@ -118,12 +119,38 @@ def fence(text):
     return f"```\n{text}\n```"
 
 
-def card(tag, base, carry, conflicts, failures, range_diff, logs):
+def installed_base(service_state, tags):
+    """The nightly tag the running T3 build is on: `0.1.10-nightly.X.Y.scheduler.1` is on
+    `v0.1.10-nightly.X.Y`."""
+    try:
+        version = json.loads(service_state.read_text())["activeVersion"]
+    except (OSError, ValueError, KeyError) as e:
+        raise SystemExit(f"cannot read the running T3 version from {service_state}: {e!r}")
+    for tag in tags:
+        if version == tag[1:] or version.startswith(tag[1:] + "."):
+            return version, tag
+    raise SystemExit(f"T3 runs {version}, which is on no {NIGHTLY} tag: cannot tell its carry")
+
+
+def origin_warning(repo, carry):
+    """A line for the log and the card when the fork's `carry` is not this one, else ''."""
+    origin = git(repo, "rev-parse", "-q", "--verify", "refs/remotes/origin/carry", check=False)
+    if origin.returncode:
+        return f"warning: no `origin/carry` in {repo}: the fork has no `carry`."
+    if origin.stdout.strip() != carry:
+        return (f"warning: `origin/carry` ({origin.stdout.strip()[:10]}) is not `carry` "
+                f"({carry[:10]}) in {repo}.")
+    return ""
+
+
+def card(tag, base, carry, conflicts, failures, range_diff, logs, warning=""):
     """A report of the result only: the card must not read as work for an agent."""
     prefix = title_prefix(tag)
     head = (f"Upstream nightly `{tag}` is out. `carry` ({carry[:10]}) is on `{base}`. "
             f"The carry check rebased a detached copy of carry onto it in a throwaway "
             f"worktree; `carry` itself did not move. Logs: {logs}")
+    if warning:
+        head += f"\n\n{warning}"
     if conflicts:
         files = "\n".join(f"- `{f}`" for f in conflicts)
         return (f"{prefix}: carry rebase conflicts\n{head}\n\n"
@@ -155,10 +182,13 @@ def taskboard(cmd, *args, stdin):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--repo", type=Path, default=Path.home() / "scratch/t3code-sro")
+    ap.add_argument("--repo", type=Path, default=Path.home() / "repos/personal/t3code")
     ap.add_argument("--work-root", type=Path, default=Path.home() / "scratch/carry-check")
     ap.add_argument("--state", type=Path,
                     default=Path.home() / ".local/state/t3code-fork/carry-check")
+    ap.add_argument("--service-state", type=Path,
+                    default=Path.home() / ".t3/runtime/service-state.json",
+                    help="names the running T3 version, whose nightly carry must hold")
     ap.add_argument("--queue", type=Path, help="the taskboard queue dir (default: taskboard's)")
     ap.add_argument("--env-sh", default=str(Path.home() / "scratch/tools/env.sh"),
                     help="sourced before step 3; empty to skip")
@@ -200,11 +230,21 @@ def locked_check(a):
         if line.startswith("worktree ") and path.parent.resolve() == a.work_root.resolve():
             git(a.repo, "worktree", "remove", "--force", str(path), check=False)
     git(a.repo, "fetch", "--quiet", "--tags", "upstream")
+    git(a.repo, "fetch", "--quiet", "--prune", "origin")
     tags = git(a.repo, "tag", "-l", NIGHTLY, "--sort=-v:refname").splitlines()
     if not tags:
         raise SystemExit(f"no {NIGHTLY} tag in {a.repo}")
-    tag, carry = tags[0], git(a.repo, "rev-parse", "carry")
+    r = git(a.repo, "rev-parse", "-q", "--verify", "refs/heads/carry", check=False)
+    if r.returncode:
+        raise SystemExit(f"no `carry` branch in {a.repo}")
+    tag, carry = tags[0], r.stdout.strip()
     base = git(a.repo, "describe", "--tags", "--abbrev=0", "--match", NIGHTLY, carry)
+    version, running = installed_base(a.service_state, tags)
+    if git(a.repo, "merge-base", "--is-ancestor", running, carry, check=False).returncode:
+        raise SystemExit(f"`carry` ({carry[:10]}) in {a.repo} is on {base}, but T3 runs "
+                         f"{version}, on {running}: this carry is stale, not the one installed")
+    if (warning := origin_warning(a.repo, carry)):
+        print(warning)
     if git(a.repo, "merge-base", "--is-ancestor", tag, carry, check=False).returncode == 0:
         print(f"carry is already on {tag}: nothing to check")
         return 0
@@ -230,7 +270,7 @@ def locked_check(a):
         git(a.repo, "worktree", "remove", "--force", str(wt), check=False)
         git(a.repo, "worktree", "prune")
 
-    body = card(tag, base, carry, conflicts, failures, range_diff, logs)
+    body = card(tag, base, carry, conflicts, failures, range_diff, logs, warning)
     (logs / "card.md").write_text(body + "\n")
     # shortcut: `add` only writes queued cards, so the card is queued for the moment
     # before `ask` parks it; a taskboard verb that files straight to needs-input would close it
