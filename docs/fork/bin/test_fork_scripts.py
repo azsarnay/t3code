@@ -6,6 +6,7 @@ Run: python3 -m unittest discover -s docs/fork/bin
 import contextlib
 import fcntl
 import io
+import json
 import os
 import re
 import select
@@ -80,7 +81,8 @@ def init(path):
 
 
 class Fixture:
-    """An upstream with two nightly tags, a fork clone whose `carry` sits on the first."""
+    """An upstream with two nightly tags, a fork clone whose `carry` sits on the first and
+    matches `origin/carry`, and T3 running a build on the first."""
 
     def __init__(self, root, conflict=False):
         """conflict: False, True (both edit app.txt) or "rename" (both rename it)."""
@@ -112,18 +114,29 @@ class Fixture:
         else:
             commit(self.repo, "app.txt" if conflict else "fix.txt", "ours\n", "fix")
         commit(self.repo, "carry.md", "notes\n", "notes")
+        self.fork = self.root / "fork.git"
+        git(self.root, "init", "-q", "--bare", str(self.fork))
+        git(self.repo, "remote", "add", "origin", str(self.fork))
+        git(self.repo, "push", "-q", "origin", "carry")
+        git(self.repo, "fetch", "-q", "origin")
+        self.service_state = self.root / "service-state.json"
+        self.installed("0.1.0-nightly.1.scheduler.1")
         self.queue = self.root / "queue"
         (self.queue / "Archive").mkdir(parents=True)
         self.stub = self.root / "taskboard_stub.py"
         self.stub.write_text(TASKBOARD_STUB)
 
+    def installed(self, version):
+        self.service_state.write_text(json.dumps({"protocol": 3, "activeVersion": version}))
+
     def run(self, step3=("true",), env_sh=""):
         carry_check.STEP3 = list(step3)
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             code = carry_check.main([
                 "--repo", str(self.repo), "--work-root", str(self.root / "work"),
                 "--state", str(self.root / "state"), "--queue", str(self.queue),
+                "--service-state", str(self.service_state),
                 "--env-sh", env_sh, "--taskboard", f"{sys.executable} {self.stub}"])
         return code, out.getvalue()
 
@@ -295,10 +308,82 @@ class CarryCheckTest(unittest.TestCase):
         self.assertEqual((code, f.cards()), (0, []))
         self.assertIn("already on", out)
 
+    def test_carry_older_than_the_running_build_is_refused(self):
+        f = Fixture(self.tmp.name)
+        carry, upstream = git(f.repo, "rev-parse", "carry"), refs(f.upstream)
+        f.installed("0.1.0-nightly.2.scheduler.1")
+        code, out = f.run()
+        self.assertEqual((code, f.cards()), (1, []))
+        self.assertIn("v0.1.0-nightly.2", out)
+        self.assertIn("stale", out)
+        self.assert_untouched(f, carry, upstream)
+
+    def test_running_build_on_no_known_nightly_is_refused(self):
+        for version in ("0.1.0-nightly.9.scheduler.1", "0.1.0-nightly.10", "0.2.0"):
+            with self.subTest(version), tempfile.TemporaryDirectory() as tmp:
+                f = Fixture(tmp)
+                f.installed(version)
+                code, out = f.run()
+                self.assertEqual((code, f.cards()), (1, []))
+                self.assertIn(version, out)
+
+    def test_missing_service_state_is_refused(self):
+        f = Fixture(self.tmp.name)
+        f.service_state.unlink()
+        code, out = f.run()
+        self.assertEqual((code, f.cards()), (1, []))
+        self.assertIn(str(f.service_state), out)
+
+    def test_missing_carry_branch_is_refused(self):
+        f = Fixture(self.tmp.name)
+        git(f.repo, "switch", "-q", "--detach")
+        git(f.repo, "branch", "-q", "-D", "carry")
+        code, out = f.run()
+        self.assertEqual((code, f.cards()), (1, []))
+        self.assertIn(f"no `carry` branch in {f.repo}", out)
+
+    def test_carry_diverged_from_origin_carry_warns_in_log_and_card(self):
+        f = Fixture(self.tmp.name)
+        old = git(f.repo, "rev-parse", "carry")
+        git(f.repo, "commit", "-q", "--amend", "-m", "notes, rebased")
+        code, out = f.run()
+        self.assertEqual(code, 0)
+        [card] = f.cards()
+        warning = f"`origin/carry` ({old[:10]}) is not `carry`"
+        self.assertIn(warning, out)
+        self.assertIn(warning, card.read_text())
+        self.assert_report(f, card)
+
+    def test_origin_carry_moved_on_the_fork_warns(self):
+        f = Fixture(self.tmp.name)
+        clone = f.root / "elsewhere"
+        git(f.root, "clone", "-q", "-b", "carry", str(f.fork), str(clone))
+        git(clone, "config", "user.email", "you@example.com")
+        git(clone, "config", "user.name", "you")
+        moved = commit(clone, "more.txt", "x\n", "more")
+        git(clone, "push", "-q", "origin", "carry")
+        code, out = f.run()
+        self.assertEqual(code, 0)
+        self.assertIn(f"`origin/carry` ({moved[:10]}) is not `carry`", out)
+
+    def test_missing_origin_carry_warns(self):
+        f = Fixture(self.tmp.name)
+        git(f.fork, "branch", "-q", "-D", "carry")
+        code, out = f.run()
+        self.assertEqual(code, 0)
+        self.assertIn("no `origin/carry`", out)
+        self.assertIn("no `origin/carry`", f.cards()[0].read_text())
+
+    def test_matching_origin_carry_does_not_warn(self):
+        f = Fixture(self.tmp.name)
+        _, out = f.run()
+        self.assertNotIn("origin/carry", out)
+        self.assertNotIn("origin/carry", f.cards()[0].read_text())
+
 
 class UnitFileTest(unittest.TestCase):
     UNITS = Path(__file__).resolve().parent.parent / "systemd"
-    CHECKOUT = "%h/scratch/t3code-sro/"
+    CHECKOUT = "%h/repos/personal/t3code-carry/"
 
     def test_services_are_bounded_and_run_scripts_on_this_branch(self):
         services = sorted(self.UNITS.glob("*.service"))

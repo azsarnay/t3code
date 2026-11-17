@@ -7,4 +7,4 @@ Type=oneshot
 TimeoutStartSec=3h
 WorkingDirectory=%h
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 %h/scratch/t3code-sro/docs/fork/bin/carry_check.py
+ExecStart=/usr/bin/python3 %h/repos/personal/t3code-carry/docs/fork/bin/carry_check.py
