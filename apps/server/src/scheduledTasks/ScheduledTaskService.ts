@@ -1360,21 +1360,23 @@ export const layer = Layer.effect(
         task_id: ScheduledTaskId;
         created_at: string;
         last_run_status: string;
+        last_run_error: string | null;
         last_run_message_id: string;
         run_id: string | null;
         thread_id: string | null;
         status: string | null;
       }>`
-        SELECT s.task_id, s.created_at, s.last_run_status, s.last_run_message_id,
-          r.run_id, r.thread_id, r.status
+        SELECT s.task_id, s.created_at, s.last_run_status, s.last_run_error,
+          s.last_run_message_id, r.run_id, r.thread_id, r.status
         FROM scheduled_tasks s
         LEFT JOIN orchestration_v2_projection_messages m ON m.message_id = s.last_run_message_id
+        -- The message's own run wins: a promoted steer cancels its queued run and joins another.
         LEFT JOIN orchestration_v2_projection_runs r
-          ON r.run_id = COALESCE(s.last_run_id, m.run_id)
-          AND r.thread_id = COALESCE(s.last_run_thread_id, m.thread_id)
-          AND json_extract(r.payload_json, '$.userMessageId') = s.last_run_message_id
+          ON r.run_id = COALESCE(m.run_id, s.last_run_id)
+          AND r.thread_id = COALESCE(m.thread_id, s.last_run_thread_id)
         WHERE s.last_run_message_id IS NOT NULL
-          AND s.last_run_status IN ('dispatching', 'dispatched', 'running', 'unknown')
+          AND (s.last_run_status IN ('dispatching', 'dispatched', 'running', 'unknown')
+            OR (s.last_run_status = 'failed' AND s.last_run_error = ${HELD_OCCURRENCE_ERROR}))
           AND NOT EXISTS (
             SELECT 1 FROM scheduled_task_webhook_pending p
             WHERE p.delivery_id = s.last_run_webhook_delivery_id AND p.state = 'running'
@@ -1384,6 +1386,9 @@ export const layer = Layer.effect(
       let changed = false;
       for (const row of rows) {
         if ((yield* Ref.get(activeRuns)).has(row.task_id)) continue;
+        // A held occurrence keeps its warning until its run leaves the queue.
+        if (row.last_run_status === "failed" && (row.status === null || row.status === "queued"))
+          continue;
         const status =
           row.status === "completed"
             ? "succeeded"
@@ -1419,11 +1424,12 @@ export const layer = Layer.effect(
             last_run_thread_id = COALESCE(${row.thread_id}, last_run_thread_id),
             run_count = run_count + ${recoveringDispatch ? 1 : 0},
             next_run_at = CASE WHEN ${recoveringDispatch && task !== null ? 1 : 0} = 1
-              THEN ${task === null ? null : nextRunAt(task, now)} ELSE next_run_at END,
+              THEN ${task === null ? null : nextRunAfterRun(task, now)} ELSE next_run_at END,
             updated_at = ${iso(now)}
           WHERE task_id = ${row.task_id} AND created_at = ${row.created_at}
             AND last_run_message_id = ${row.last_run_message_id}
             AND last_run_status = ${row.last_run_status}
+            AND last_run_error IS ${row.last_run_error}
             AND (last_run_status <> ${status} OR last_run_error IS NOT ${error}
               OR (${row.run_id} IS NOT NULL AND last_run_id IS NOT ${row.run_id})
               OR (${row.thread_id} IS NOT NULL AND last_run_thread_id IS NOT ${row.thread_id}))

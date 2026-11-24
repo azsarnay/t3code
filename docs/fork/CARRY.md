@@ -51,9 +51,12 @@ The build tools live outside the repo. Load them first with `. ~/scratch/tools/e
    vp run --filter t3 build
    node scripts/apply-web-brand-assets.ts nightly apps/server/dist/client
    node apps/server/scripts/cli.ts build-exe
-   cp <running runtime>/resource-monitor/linux-x64/t3-resource-monitor ~/scratch/rm4151/linux-x64/   # only if native/resource-monitor changed
+   # No cargo here: take the monitor from upstream's own release of this tag, never the running build.
+   S=$(mktemp -d ~/scratch/stock-XXXX) && (cd "$S" && gh release download <tag> -R pingdotgg/t3code \
+     -p "t3-${V%.scheduler.*}-linux-x64.tar.gz" -p SHA256SUMS && grep linux-x64 SHA256SUMS | sha256sum -c - \
+     && tar -xzf t3-*.tar.gz --strip-components=1 --wildcards '*/resource-monitor/*')
    node scripts/build-cli-archive.ts --platform linux --arch x64 --version "$V" \
-     --resource-monitor-dir ~/scratch/rm4151 --output-dir ~/scratch/release-cli-$V
+     --resource-monitor-dir "$S/resource-monitor" --output-dir ~/scratch/release-cli-$V
    node scripts/smoke-cli-archive.ts --archive ~/scratch/release-cli-$V/t3-$V-linux-x64.tar.gz --expect-version "$V"
    mkdir -p ~/scratch/release-serve/v$V && ln -f ~/scratch/release-cli-$V/t3-$V-linux-x64.tar.gz ~/scratch/release-serve/v$V/
    (cd ~/scratch/release-serve/v$V && sha256sum t3-$V-linux-x64.tar.gz > SHA256SUMS)

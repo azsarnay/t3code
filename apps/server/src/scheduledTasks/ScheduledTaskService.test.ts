@@ -45,6 +45,76 @@ const threadShell = (
   state: { archivedAt?: string | null; deletedAt?: string | null } = {},
 ) => ({ projectId, archivedAt: null, deletedAt: null, ...state }) as never;
 
+const outcomeHarness = () => {
+  const launches: string[] = [];
+  const workers = new Map<string, Effect.Effect<void>>();
+  const dependencies = Layer.mergeAll(
+    ManagedPolicy.layerTest(),
+    Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+      launch: (input) =>
+        Effect.sync(() => {
+          launches.push(input.initialMessage!.messageId!);
+          return { threadId: ThreadId.make("outcome-thread"), resumed: false } as never;
+        }),
+    }),
+    Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+    Layer.mock(SecretRequests.SecretRequests)({}),
+    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+      namedProjectsRoot: "/projects",
+      isScratchProject: () => Effect.succeed(false),
+    }),
+    NodeCrypto.layer,
+    Layer.succeed(Scheduler.Scheduler, {
+      register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
+        Effect.gen(function* () {
+          const context = yield* Effect.context<R>();
+          workers.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
+        }),
+    }),
+  );
+  return {
+    launches,
+    serviceLayer: ScheduledTaskService.layer.pipe(Layer.provide(dependencies)),
+    tick: Effect.suspend(() => workers.get("scheduled-tasks")!),
+  };
+};
+
+/** Seeds a run and, unless `messageRunId` is null, the message it carries. */
+const seedProjection = Effect.fn("test.seedProjection")(function* (
+  sql: SqlClient.SqlClient,
+  now: string,
+  input: {
+    readonly messageId: string;
+    readonly runId: string;
+    readonly status: string;
+    readonly ordinal: number;
+    readonly messageRunId?: string | null;
+  },
+) {
+  if (input.messageRunId !== null)
+    yield* sql`INSERT INTO orchestration_v2_projection_messages ${sql.insert({
+      message_id: input.messageId,
+      thread_id: "outcome-thread",
+      run_id: input.messageRunId ?? input.runId,
+      node_id: null,
+      role: "user",
+      streaming: 0,
+      created_at: now,
+      updated_at: now,
+      payload_json: "{}",
+    })}`;
+  yield* sql`INSERT INTO orchestration_v2_projection_runs ${sql.insert({
+    run_id: input.runId,
+    thread_id: "outcome-thread",
+    ordinal: input.ordinal,
+    provider: "codex",
+    status: input.status,
+    requested_at: now,
+    completed_at: null,
+    payload_json: JSON.stringify({ userMessageId: input.messageId }),
+  })}`;
+});
+
 it.effect(
   "reconciles exact scheduled messages across restart without replaying or stamping newer runs",
   () =>
@@ -53,63 +123,10 @@ it.effect(
       const now = "2026-10-26T12:00:00.000Z";
       yield* TestClock.setTime(Date.parse(now));
       yield* insertRow(sql, { id: "outcomes", next: null, enabled: 0, status: "never" }, now);
-      const launches: string[] = [];
-      const workers = new Map<string, Effect.Effect<void>>();
-      const dependencies = Layer.mergeAll(
-        ManagedPolicy.layerTest(),
-        Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-          launch: (input) =>
-            Effect.sync(() => {
-              launches.push(input.initialMessage!.messageId!);
-              return { threadId: ThreadId.make("outcome-thread"), resumed: false } as never;
-            }),
-        }),
-        Layer.mock(ThreadManagementService.ThreadManagementService)({}),
-        Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
-          namedProjectsRoot: "/projects",
-          isScratchProject: () => Effect.succeed(false),
-        }),
-        NodeCrypto.layer,
-        Layer.succeed(Scheduler.Scheduler, {
-          register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
-            Effect.gen(function* () {
-              const context = yield* Effect.context<R>();
-              workers.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
-            }),
-        }),
-      );
-      const serviceLayer = ScheduledTaskService.layer.pipe(Layer.provide(dependencies));
-      const tick = Effect.suspend(() => workers.get("scheduled-tasks")!);
+      const { launches, serviceLayer, tick } = outcomeHarness();
       const taskId = ScheduledTaskId.make("outcomes");
-      const seedRun = Effect.fn("test.seedScheduledRun")(function* (
-        messageId: string,
-        runId: string,
-        status: string,
-        ordinal: number,
-      ) {
-        yield* sql`INSERT INTO orchestration_v2_projection_messages ${sql.insert({
-          message_id: messageId,
-          thread_id: "outcome-thread",
-          run_id: runId,
-          node_id: null,
-          role: "user",
-          streaming: 0,
-          created_at: now,
-          updated_at: now,
-          payload_json: "{}",
-        })}`;
-        yield* sql`INSERT INTO orchestration_v2_projection_runs ${sql.insert({
-          run_id: runId,
-          thread_id: "outcome-thread",
-          ordinal,
-          provider: "codex",
-          status,
-          requested_at: now,
-          completed_at: null,
-          payload_json: JSON.stringify({ userMessageId: messageId }),
-        })}`;
-      });
+      const seedRun = (messageId: string, runId: string, status: string, ordinal: number) =>
+        seedProjection(sql, now, { messageId, runId, status, ordinal });
       yield* Effect.scoped(
         Effect.gen(function* () {
           const context = yield* Layer.build(serviceLayer);
@@ -187,6 +204,113 @@ it.effect(
           }),
         );
       }
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect(
+  "reconcile follows promoted and held messages to their real run, and restart keeps an early one-time run's occurrence",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-10-26T12:00:00.000Z";
+      yield* TestClock.setTime(Date.parse(now));
+      yield* ensureScheduledTaskOutcomeSchema();
+      const { serviceLayer, tick } = outcomeHarness();
+      const held =
+        "A previous occurrence is held in the thread queue. Resume or remove it to run this task again.";
+      const seedTask = Effect.fn("test.seedTask")(function* (
+        id: string,
+        row: {
+          readonly status: string;
+          readonly runId?: string;
+          readonly error?: string;
+          readonly once?: { readonly runAt: string; readonly startedAt: string };
+        },
+      ) {
+        yield* insertRow(
+          sql,
+          {
+            id,
+            next: null,
+            enabled: row.once === undefined ? 0 : 1,
+            status: row.status,
+            ...(row.once === undefined
+              ? {}
+              : { scheduleJson: JSON.stringify({ type: "once", runAt: row.once.runAt }) }),
+          },
+          now,
+        );
+        yield* sql`UPDATE scheduled_tasks SET last_run_message_id = ${`${id}-message`},
+          last_run_id = ${row.runId ?? null}, last_run_thread_id = 'outcome-thread',
+          last_run_error = ${row.error ?? null}, last_run_at = ${row.once?.startedAt ?? now}
+          WHERE task_id = ${id}`;
+      });
+      const read = (id: string) =>
+        sql<{
+          last_run_status: string;
+          last_run_error: string | null;
+          next_run_at: string | null;
+        }>`SELECT last_run_status, last_run_error, next_run_at FROM scheduled_tasks WHERE task_id = ${id}`.pipe(
+          Effect.map((rows) => rows[0]!),
+        );
+
+      // Promoting a queued message to a steer cancels its queued run and moves the message
+      // into the active run, whose userMessageId is the message that started it.
+      yield* seedProjection(sql, now, {
+        messageId: "user-message",
+        runId: "active-run",
+        status: "running",
+        ordinal: 1,
+      });
+      for (const [index, cached] of [true, false].entries()) {
+        const id = cached ? "promoted-cached" : "promoted";
+        yield* seedTask(id, { status: "dispatched", ...(cached ? { runId: `queued-${id}` } : {}) });
+        yield* seedProjection(sql, now, {
+          messageId: `${id}-message`,
+          runId: `queued-${id}`,
+          status: "cancelled",
+          ordinal: index + 2,
+          messageRunId: "active-run",
+        });
+      }
+      yield* seedTask("held", { status: "failed", error: held });
+      yield* seedProjection(sql, now, {
+        messageId: "held-message",
+        runId: "held-run",
+        status: "queued",
+        ordinal: 4,
+      });
+      yield* seedTask("early-once", {
+        status: "dispatching",
+        once: { runAt: "2026-10-26T11:55:00.000Z", startedAt: "2026-10-26T11:50:00.000Z" },
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* Layer.build(serviceLayer);
+          assert.equal((yield* read("promoted-cached")).last_run_status, "running");
+          assert.equal((yield* read("promoted")).last_run_status, "running");
+          assert.deepInclude(yield* read("held"), {
+            last_run_status: "failed",
+            last_run_error: held,
+          });
+          // Recovery counts a one-time task from its start, as a normal completion does.
+          assert.deepInclude(yield* read("early-once"), {
+            last_run_status: "unknown",
+            next_run_at: "2026-10-26T11:55:00.000Z",
+          });
+
+          yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'completed'
+            WHERE run_id IN ('active-run', 'held-run')`;
+          yield* tick;
+          for (const id of ["promoted-cached", "promoted", "held"]) {
+            assert.deepInclude(yield* read(id), {
+              last_run_status: "succeeded",
+              last_run_error: null,
+            });
+          }
+        }),
+      );
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
@@ -572,8 +696,18 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
 it.effect.each([
   { status: "failed", recorded: "failed", error: "Weekly usage limit reached", heldWarning: false },
   { status: "failed", recorded: "failed", error: "Weekly usage limit reached", heldWarning: true },
-  { status: "interrupted", recorded: "cancelled", error: "The run was stopped.", heldWarning: false },
-  { status: "cancelled", recorded: "cancelled", error: "The run was cancelled.", heldWarning: false },
+  {
+    status: "interrupted",
+    recorded: "cancelled",
+    error: "The run was stopped.",
+    heldWarning: false,
+  },
+  {
+    status: "cancelled",
+    recorded: "cancelled",
+    error: "The run was cancelled.",
+    heldWarning: false,
+  },
 ] as const)("a run that ends $status after its message was accepted records it", (outcome) =>
   Effect.gen(function* () {
     const projectId = ProjectId.make("project:test");
