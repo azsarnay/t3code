@@ -131,6 +131,7 @@ export const make = Effect.gen(function* () {
           }
         : {}),
       checkedAt,
+      ...(config.accountNames ? { accountNames: config.accountNames } : {}),
     } as const;
     const managementKey = yield* readManagementKey(config);
     if (managementKey.length === 0) {

@@ -45,6 +45,13 @@ it.effect("keeps malformed source URLs encodable for config subscribers", () =>
       undefined,
     ]);
     expect(snapshots[3]?.endpoint).toBe("https://hub.test:8317/team-a");
+    expect(snapshots.map((source) => source.accountNames)).toEqual([
+      undefined,
+      undefined,
+      { "user-a@example.com": { displayName: "Work", accentColor: "#3b82f6" } },
+      undefined,
+      undefined,
+    ]);
     expect(() =>
       encodeConfigEvent({
         version: 1,
@@ -82,6 +89,7 @@ it.effect("keeps malformed source URLs encodable for config subscribers", () =>
             label: "Named hub",
             managementKey: "",
             enabled: true,
+            accountNames: { "user-a@example.com": { displayName: "Work", accentColor: "#3b82f6" } },
           },
           [UsageLimitSourceId.make("valid-hub")]: {
             kind: "cliproxy",

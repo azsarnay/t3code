@@ -934,6 +934,70 @@ describe("pools", () => {
     ]);
   });
 
+  it("names hub accounts from the source's email map, keeping a provider's chosen name", () => {
+    const native = provider({
+      driver: claude,
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      displayName: "Claude",
+      auth: { status: "authenticated", email: "user-a@example.com" },
+      usageLimits: { checkedAt, windows: [window] },
+    });
+    const named = provider({
+      driver: claude,
+      instanceId: ProviderInstanceId.make("claude-work"),
+      displayName: "Work",
+      accentColor: "#22c55e",
+      auth: { status: "authenticated", email: "user-b@example.com" },
+      usageLimits: { checkedAt, windows: [window] },
+    });
+    const hubAccount = (email: string) => ({
+      id: `claude-${email}.json`,
+      driver: claude,
+      email,
+      usageLimits: { checkedAt, windows: [window] },
+    });
+    const input = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        {
+          ...laptop,
+          serverConfig: {
+            providers: [native, named],
+            usageLimitSources: [
+              {
+                ...source,
+                accountNames: {
+                  " USER-A@example.com": { displayName: "Personal", accentColor: "#f97316" },
+                  "user-b@example.com": { displayName: "Hub B", accentColor: "#a855f7" },
+                  "User-C@Example.com ": { displayName: "Team" },
+                  "user-e@example.com": { displayName: "Unused" },
+                },
+                accounts: [
+                  hubAccount("user-a@example.com"),
+                  hubAccount("user-b@example.com"),
+                  hubAccount("USER-C@example.com"),
+                  hubAccount("user-d@example.com"),
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    ]);
+    expect(
+      collectLimitAccounts(input).map(({ displayName, email, accentColor }) => ({
+        displayName,
+        email,
+        accentColor,
+      })),
+    ).toEqual([
+      { displayName: "Personal", email: "user-a@example.com", accentColor: "#f97316" },
+      { displayName: "Work", email: "user-b@example.com", accentColor: "#22c55e" },
+      { displayName: "Team", email: "USER-C@example.com", accentColor: undefined },
+      { displayName: null, email: "user-d@example.com", accentColor: undefined },
+    ]);
+  });
+
   it("pools Codex windows by kind, whichever slot reported them", () => {
     const codexAccount = (id: string, slots: readonly string[]) => ({
       id,
@@ -1494,16 +1558,23 @@ describe("/usage-limits", () => {
     expect(report?.accounts[0]?.limits.resetCredits?.availableCount).toBe(3);
   });
 
-  it("labels hub rows by account id without .json", () => {
+  it("labels hub rows by mapped name, else by account id without .json", () => {
     const hub = [
       {
         ...sources[0]!,
         label: "CLIProxyAPI",
+        accountNames: { " User-C@Example.com": { displayName: "Team", accentColor: "#f97316" } },
         accounts: [
           {
             id: "claude-b@example.com.json",
             driver: selected.driver,
             email: "b@example.com",
+            usageLimits: limits,
+          },
+          {
+            id: "claude-user-c@example.com.json",
+            driver: selected.driver,
+            email: "user-c@example.com",
             usageLimits: limits,
           },
           { id: "team-seat.json", driver: selected.driver, usageLimits: limits },
@@ -1512,8 +1583,18 @@ describe("/usage-limits", () => {
     ];
     const report = collectProviderUsageLimits(selected.instanceId, [selected], hub, now);
     expect(
-      report?.accounts.filter((account) => account.sourceLabel).map((account) => account.label),
-    ).toEqual(["CLIProxyAPI · claude-b@example.com", "CLIProxyAPI · team-seat"]);
+      report?.accounts
+        .filter((account) => account.sourceLabel)
+        .map(({ label, displayName, accentColor }) => ({ label, displayName, accentColor })),
+    ).toEqual([
+      {
+        label: "CLIProxyAPI · claude-b@example.com",
+        displayName: undefined,
+        accentColor: undefined,
+      },
+      { label: "CLIProxyAPI · Team", displayName: "Team", accentColor: "#f97316" },
+      { label: "CLIProxyAPI · team-seat", displayName: undefined, accentColor: undefined },
+    ]);
   });
 
   it("keeps unidentified custom instances separate, filtering by driver", () => {

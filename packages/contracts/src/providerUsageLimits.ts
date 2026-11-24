@@ -84,6 +84,16 @@ export const UsageLimitSourceAccount = Schema.Struct({
 });
 export type UsageLimitSourceAccount = typeof UsageLimitSourceAccount.Type;
 
+export const UsageLimitAccountName = Schema.Struct({
+  displayName: TrimmedNonEmptyString,
+  accentColor: Schema.optional(TrimmedNonEmptyString),
+});
+export type UsageLimitAccountName = typeof UsageLimitAccountName.Type;
+
+/** Keyed by account email; matched without regard to case or surrounding spaces. */
+export const UsageLimitAccountNames = Schema.Record(Schema.String, UsageLimitAccountName);
+export type UsageLimitAccountNames = typeof UsageLimitAccountNames.Type;
+
 export const UsageLimitSourceSnapshot = Schema.Struct({
   id: UsageLimitSourceId,
   kind: Schema.Literal("cliproxy"),
@@ -94,6 +104,7 @@ export const UsageLimitSourceSnapshot = Schema.Struct({
   endpoint: Schema.optional(TrimmedNonEmptyString),
   checkedAt: IsoDateTime,
   accounts: ForwardCompatibleArray(UsageLimitSourceAccount),
+  accountNames: Schema.optional(UsageLimitAccountNames),
   error: Schema.optional(TrimmedNonEmptyString),
 });
 export type UsageLimitSourceSnapshot = typeof UsageLimitSourceSnapshot.Type;

@@ -301,6 +301,17 @@ function hubIdentity(environmentId: EnvironmentId, source: UsageLimitSourceSnaps
   return endpoint && !local ? endpoint : `${environmentId}:${source.id}`;
 }
 
+const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
+function namedHubAccount(
+  source: UsageLimitSourceSnapshot,
+  account: { readonly email?: string | undefined },
+) {
+  if (!account.email || !source.accountNames) return undefined;
+  const email = normalizeEmail(account.email);
+  return Object.entries(source.accountNames).find(([key]) => normalizeEmail(key) === email)?.[1];
+}
+
 export interface LimitAccount {
   readonly key: string;
   readonly driver: ServerProvider["driver"];
@@ -370,14 +381,14 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
     const hubEmail = [previous, next].some(
       (account) => account.environments.length === 0 && account.email,
     );
-    const displayName = previous.displayName ?? next.displayName;
+    const defaultName = PROVIDER_DISPLAY_NAMES[previous.driver]?.toLowerCase();
+    const displayName =
+      [previous.displayName, next.displayName].find(
+        (name) => name && !(hubEmail && name.toLowerCase() === defaultName),
+      ) ?? null;
     accounts.set(key, {
       ...previous,
-      displayName:
-        hubEmail &&
-        displayName?.toLowerCase() === PROVIDER_DISPLAY_NAMES[previous.driver]?.toLowerCase()
-          ? null
-          : displayName,
+      displayName,
       plan: planSources.get(key)?.plan ?? previous.plan ?? next.plan,
       accentColor: previous.accentColor ?? next.accentColor,
       environments,
@@ -424,13 +435,14 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         // A resolved account already has an identity; its public key must stay distinct from others'.
         const hub = resolved ? `${environmentId}:${source.id}` : hubIdentity(environmentId, source);
         const key = `${hub}:${account.id}${account.workspaceId ? `:${account.workspaceId}` : ""}`;
+        const named = namedHubAccount(source, account);
         merge(hubRowKey(resolveKey, environmentId, source, account), {
           key,
           driver: account.driver,
-          displayName: account.email ? null : hubAccountName(account),
+          displayName: named?.displayName ?? (account.email ? null : hubAccountName(account)),
           email: account.email,
           plan: account.plan,
-          accentColor: undefined,
+          accentColor: named?.accentColor,
           environments: [],
           sourceLabel,
           redeem: account.usageLimits.resetCredits?.nextCreditId
@@ -1069,10 +1081,13 @@ export function collectProviderUsageLimits(
     for (const account of matching) {
       const key = resolveKey(account);
       if (key && nativeAccountKeys.has(key)) continue;
+      const named = namedHubAccount(source, account);
       accounts.push({
         id: `${source.id}:${account.id}`,
         driver: account.driver,
-        label: `${source.label} · ${hubAccountName(account)}`,
+        label: `${source.label} · ${named?.displayName ?? hubAccountName(account)}`,
+        ...(named ? { displayName: named.displayName } : {}),
+        ...(named?.accentColor ? { accentColor: named.accentColor } : {}),
         sourceLabel: "CLI Proxy",
         ...(account.usageLimits.resetCredits?.nextCreditId
           ? {

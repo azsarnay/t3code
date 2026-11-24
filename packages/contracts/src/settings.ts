@@ -23,6 +23,7 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+import { UsageLimitAccountNames } from "./providerUsageLimits.ts";
 import { UsageModelFilter } from "./usage.ts";
 import { SecretProviderId, SecretProviderSlug } from "./secretReference.ts";
 import { containsSecretReference, SettingsSecretValue } from "./settingsSecretValue.ts";
@@ -957,6 +958,8 @@ export const UsageLimitSourceConfig = Schema.Struct({
     secretSetting,
   ),
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Hand-edited; a typo drops only the names rather than every setting.
+  accountNames: ForwardCompatibleOptional(UsageLimitAccountNames),
 });
 export type UsageLimitSourceConfig = typeof UsageLimitSourceConfig.Type;
 

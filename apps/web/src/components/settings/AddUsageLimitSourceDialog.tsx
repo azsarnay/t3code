@@ -54,6 +54,7 @@ export function AddUsageLimitSourceDialog({
   const save = () => {
     if (!canSave) return;
     const id = sourceIdFromUrl(trimmedUrl, sources);
+    const accountNames = sources[id]?.accountNames;
     updateSettings({
       usageLimitSources: {
         [id]: {
@@ -62,6 +63,7 @@ export function AddUsageLimitSourceDialog({
           url: trimmedUrl,
           managementKey,
           enabled: true,
+          ...(accountNames ? { accountNames } : {}),
         },
       },
     });

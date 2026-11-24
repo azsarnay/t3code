@@ -160,6 +160,30 @@ describe("ServerSettings usage price overrides", () => {
   });
 });
 
+it("decodes hub account names and drops a malformed map without dropping the hub or other settings", () => {
+  const hub = { kind: "cliproxy", url: "http://hub.example:8318" };
+  const accountNames = {
+    "user-a@example.com": { displayName: "Work", accentColor: "#3b82f6" },
+    "user-b@example.com": { displayName: "Personal" },
+  };
+  const decodedHub = (raw: unknown) =>
+    Object.values(decodeServerSettings({ usageLimitSources: { hub: raw } }).usageLimitSources)[0];
+  expect(decodedHub({ ...hub, accountNames })?.accountNames).toEqual(accountNames);
+  for (const malformed of [
+    { "user-a@example.com": "Work" },
+    { "user-a@example.com": { displayName: " " } },
+    { "user-a@example.com": { displayName: "Work", accentColor: "" } },
+  ]) {
+    const settings = decodeServerSettings({
+      worktreesDirectory: "/work",
+      usageLimitSources: { hub: { ...hub, accountNames: malformed } },
+    });
+    expect(settings.worktreesDirectory).toBe("/work");
+    expect(decodedHub({ ...hub, accountNames: malformed })).toMatchObject({ url: hub.url });
+    expect(decodedHub({ ...hub, accountNames: malformed })?.accountNames).toBeUndefined();
+  }
+});
+
 it("drops a hand-edited non-string hidden tag and keeps the rest of the settings", () => {
   const settings = decodeServerSettings({
     hiddenThreadTags: ["private", 123],
