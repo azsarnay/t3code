@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew the chief-of-staff T3 MCP token before its 30 days run out
+
+[Service]
+Type=oneshot
+TimeoutStartSec=5min
+WorkingDirectory=%h
+ExecStart=%h/repos/personal/t3code-carry/docs/fork/bin/cos_t3_renew.sh

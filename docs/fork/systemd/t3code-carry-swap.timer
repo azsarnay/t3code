@@ -1,0 +1,8 @@
+[Unit]
+Description=t3code carry swap, every 20 minutes from 01:00 to 05:40
+
+[Timer]
+OnCalendar=*-*-* 01..05:00/20:00
+
+[Install]
+WantedBy=timers.target

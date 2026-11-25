@@ -387,13 +387,13 @@ class UnitFileTest(unittest.TestCase):
 
     def test_services_are_bounded_and_run_scripts_on_this_branch(self):
         services = sorted(self.UNITS.glob("*.service"))
-        self.assertEqual(len(services), 2)
+        self.assertEqual(len(services), 4)
         tree = Path(__file__).resolve().parents[3]
         self.assertTrue((tree / "docs/fork/CARRY.md").is_file(), "the scripts belong on `carry`")
         for unit in services:
             text = unit.read_text()
             self.assertRegex(text, r"(?m)^TimeoutStartSec=\S", unit.name)
-            [script] = re.findall(r"(?m)^ExecStart=\S*python3 (\S+)", text)
+            [script] = re.findall(r"(?m)^ExecStart=(?:\S*python3 )?(\S+)", text)
             self.assertTrue(script.startswith(self.CHECKOUT), script)
             self.assertTrue((tree / script.removeprefix(self.CHECKOUT)).is_file(), script)
 

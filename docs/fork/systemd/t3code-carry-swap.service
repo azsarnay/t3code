@@ -1,0 +1,10 @@
+[Unit]
+Description=t3code carry swap (install the queued build when the fleet is quiet; restarts T3)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=30min
+WorkingDirectory=%h
+# 75 = fleet not quiet, the timer tries again
+SuccessExitStatus=75
+ExecStart=%h/repos/personal/t3code-carry/docs/fork/bin/carry_swap.sh

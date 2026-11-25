@@ -1,10 +1,9 @@
 [Unit]
-Description=t3code carry check (rebase a copy of carry onto the newest nightly, file a card)
+Description=t3code carry build (put carry on the newest nightly, test, build, queue the night swap)
 
 [Service]
 Type=oneshot
-# above the three 45-minute check limits in carry_check.py
+# a build takes about ten minutes; this bounds a hung one
 TimeoutStartSec=3h
 WorkingDirectory=%h
-Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 %h/repos/personal/t3code-carry/docs/fork/bin/carry_check.py
+ExecStart=%h/repos/personal/t3code-carry/docs/fork/bin/carry_auto.sh
